@@ -35,21 +35,6 @@
 
 ---
 
-## 🎬 See It In Action
-
-<div align="center">
-
-https://github.com/user-attachments/assets/ShowcaseSnappy_final_cut.mp4
-
-*Context Mode intelligently grouping tiled windows*
-
-</div>
-
-> 📹 **Note:** After pushing to GitHub, replace the video URL above with the actual GitHub-hosted video link.  
-> Drag your `.mp4` file into a GitHub Issue/PR text box to get the embed URL.
-
----
-
 ## 🔄 How It Works
 
 ```mermaid
@@ -198,7 +183,7 @@ Press <kbd>Alt</kbd> + <kbd>Tab</kbd> to see it in action.
 </tr>
 <tr>
 <td align="center">
-<img src="assets/tokyo-night[red].png" width="250"/><br/>
+<img src="assets/tokyo-night.png" width="250"/><br/>
 <b>Tokyo Night</b>
 </td>
 <td align="center">
