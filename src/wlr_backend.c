@@ -28,8 +28,10 @@ struct WindowNode {
   int state;
   int is_active;
   int is_minimized;
+  int activation_serial; // window activation serial
   WindowNode *next;
 };
+
 typedef struct {
   struct wl_display *display;
   struct wl_registry *registry;
@@ -39,9 +41,38 @@ typedef struct {
   int window_count;
   int initialized;
   int needs_refresh;
+  int activation_counter; // global activation counter
 } WlrBackendState;
 
 static WlrBackendState backend_state = {0};
+
+// move window to the front of the activation history list
+static void move_window_to_front(WindowNode *window) {
+  if (!window || !backend_state.windows || window == backend_state.windows) {
+    return;
+  }
+
+  // remove window from the list
+  WindowNode **prev = &backend_state.windows;
+  WindowNode *curr = backend_state.windows;
+
+  while (curr) {
+    if (curr == window) {
+      *prev = curr->next;
+      break;
+    }
+    prev = &curr->next;
+    curr = curr->next;
+  }
+
+  // insert window to the front of the list
+  window->next = backend_state.windows;
+  backend_state.windows = window;
+
+  // update activation serial (smaller numbers mean more recently activated)
+  backend_state.activation_counter++;
+  window->activation_serial = backend_state.activation_counter;
+}
 
 static void registry_handle_global(void *data, struct wl_registry *registry,
                                    uint32_t name, const char *interface,
@@ -126,6 +157,8 @@ toplevel_handle_state(void *data,
   WindowNode *window = (WindowNode *)data;
   (void)toplevel;
 
+  int was_active = window->is_active;
+
   window->state = 0;
   window->is_active = 0;
   window->is_minimized = 0;
@@ -139,6 +172,12 @@ toplevel_handle_state(void *data,
     if (*state == ZWLR_FOREIGN_TOPLEVEL_HANDLE_V1_STATE_MINIMIZED) {
       window->is_minimized = 1;
     }
+  }
+
+  // if window is active and wasn't before, move it to the front
+  if (window->is_active && !was_active) {
+    LOG("Window became active: %s", window->title);
+    move_window_to_front(window);
   }
 }
 
@@ -228,6 +267,9 @@ manager_handle_toplevel(void *data,
     snprintf(window->identifier, 64, "wlr-%p", toplevel);
   }
 
+  // initial activation serial is 0 (0 means never activated)
+  window->activation_serial = 0;
+
   window->next = backend_state.windows;
   backend_state.windows = window;
   backend_state.window_count++;
@@ -269,6 +311,7 @@ static void cleanup_windows(void) {
   }
   backend_state.windows = NULL;
   backend_state.window_count = 0;
+  backend_state.activation_counter = 0;
 }
 
 int wlr_backend_init(void) {
@@ -314,7 +357,21 @@ int wlr_backend_init(void) {
   LOG("Second roundtrip to get initial windows...");
   wl_display_roundtrip(backend_state.display);
 
-  LOG("WLR backend initialized with %d windows", backend_state.window_count);
+  // set activation serial for initial windows
+  int counter = 0;
+  WindowNode *curr = backend_state.windows;
+  while (curr) {
+    if (curr->is_active) {
+      // current active window should be in front
+      backend_state.activation_counter++;
+      curr->activation_serial = backend_state.activation_counter;
+      counter++;
+    }
+    curr = curr->next;
+  }
+
+  LOG("WLR backend initialized with %d windows (%d active)",
+      backend_state.window_count, counter);
   backend_state.initialized = 1;
   backend_state.needs_refresh = 0;
 
@@ -349,6 +406,7 @@ void wlr_backend_cleanup(void) {
   backend_state.initialized = 0;
   backend_state.window_count = 0;
   backend_state.needs_refresh = 0;
+  backend_state.activation_counter = 0;
 }
 
 int wlr_get_windows(AppState *state, Config *config) {
@@ -364,6 +422,7 @@ int wlr_get_windows(AppState *state, Config *config) {
   app_state_free(state);
   app_state_init(state);
 
+  // process pending events
   while (wl_display_prepare_read(backend_state.display) != 0) {
     wl_display_dispatch_pending(backend_state.display);
   }
@@ -387,6 +446,9 @@ int wlr_get_windows(AppState *state, Config *config) {
     return 0;
   }
 
+  // sort windows by activation order
+  // the list is already sorted by activation order (most recently activated
+  // first)
   WindowNode *curr = backend_state.windows;
   int index = 0;
 
@@ -402,22 +464,39 @@ int wlr_get_windows(AppState *state, Config *config) {
     info.title = strdup(curr->title ? curr->title : "Untitled");
     info.class_name = strdup(curr->app_id ? curr->app_id : "unknown");
     info.workspace_id = 0;
-    info.focus_history_id = curr->is_active ? 0 : 1000 + index;
+
+    // use activation serial as focus_history_id
+    // activation serial is larger for more recently activated
+    // for windows that have never been activated, give them a very large value
+    // to ensure they are at the end
+    if (curr->activation_serial == 0) {
+      info.focus_history_id = 10000 + index;
+    } else {
+      // activation serial is smaller for more recently activated (because we
+      // want the most recently activated at the front) use the maximum value
+      // minus the serial number to achieve this
+      info.focus_history_id = 1000 - curr->activation_serial;
+    }
+
     info.is_active = curr->is_active;
     info.is_floating = 0;
     info.group_count = 1;
+    info.focus_history_id = curr->is_active ? 0 : info.focus_history_id;
 
     if (app_state_add(state, &info) < 0) {
       window_info_free(&info);
       LOG("Failed to add window to AppState");
     } else {
-      LOG("Added window %d: %s (%s)", index, info.title, info.class_name);
+      LOG("Added window %d: %s (%s), activation_serial: %d", index, info.title,
+          info.class_name, curr->activation_serial);
     }
 
     curr = curr->next;
     index++;
   }
 
+  // sort windows by focus_history_id (smaller numbers mean more recently
+  // activated)
   if (state->count > 1) {
     int i, j;
     for (i = 0; i < state->count - 1; i++) {
@@ -447,12 +526,16 @@ void wlr_activate_window(const char *identifier) {
   WindowNode *curr = backend_state.windows;
   while (curr) {
     if (curr->identifier && strcmp(curr->identifier, identifier) == 0) {
-      /* 激活窗口 */
+      LOG("Found window to activate: %s", curr->title);
+
+      // update activation history: move window to the front
+      move_window_to_front(curr);
+
+      // send activation request
       if (curr->handle && backend_state.seat) {
         LOG("Activating window via WLR protocol: %s", curr->title);
         zwlr_foreign_toplevel_handle_v1_activate(curr->handle,
                                                  backend_state.seat);
-
         wl_display_flush(backend_state.display);
         LOG("Window activation sent");
       }
