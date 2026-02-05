@@ -78,6 +78,7 @@ static void init_paths(void) {
   icon_dirs[icon_idx++] = user_icons_path2;
   icon_dirs[icon_idx++] = "/usr/share/icons";
   icon_dirs[icon_idx++] = "/usr/local/share/icons";
+  icon_dirs[icon_idx++] = "/var/lib/flatpak/exports/share/icons";
   icon_dirs[icon_idx++] = "/usr/share/pixmaps";
   icon_dirs[icon_idx] = NULL;
 
@@ -390,6 +391,35 @@ cairo_surface_t *load_app_icon(const char *class_name, int size) {
     return NULL;
   }
 
+  cairo_surface_t *surface = NULL;
+
+  /* Check if icon_name is an absolute path */
+  if (icon_name[0] == '/' && file_exists(icon_name)) {
+    LOG("Loading absolute path icon: %s", icon_name);
+    const char *ext = strrchr(icon_name, '.');
+    if (ext) {
+      if (strcasecmp(ext, ".png") == 0) {
+        surface = load_png_icon(icon_name, size);
+      }
+#ifdef HAVE_RSVG
+      else if (strcasecmp(ext, ".svg") == 0) {
+        surface = load_svg_icon(icon_name, size);
+      }
+#endif
+    }
+    if (surface) {
+      /* Cache result */
+      if (cache_count < MAX_CACHE) {
+        strncpy(icon_cache[cache_count].class_name, class_name, 127);
+        icon_cache[cache_count].size = size;
+        icon_cache[cache_count].surface = surface;
+        cairo_surface_reference(surface);
+        cache_count++;
+      }
+      return surface;
+    }
+  }
+
   /* Find icon file in themes */
   char *icon_path = find_icon_in_theme(current_theme, icon_name, size);
   if (!icon_path) {
@@ -402,7 +432,7 @@ cairo_surface_t *load_app_icon(const char *class_name, int size) {
     icon_path = find_icon_in_theme("Adwaita", icon_name, size);
   }
 
-  cairo_surface_t *surface = NULL;
+  surface = NULL;
 
   if (icon_path) {
     LOG("Loading icon: %s", icon_path);
